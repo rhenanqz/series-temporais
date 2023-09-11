@@ -411,3 +411,96 @@ read_results <- read.csv("final_garch_results_btc.csv")
 
 # View the first few rows of the dataframe
 head(read_results)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Function to get daily and houly data from cryptocurrencies
+
+fetch_cryto_data <- function(fsym, 
+                             tsym, 
+                             timestamp_now = as.numeric(as.POSIXct("2023-08-31")),
+                             frequency = "daily") {
+  base_url <- ifelse(frequency == "daily",
+                     "https://min-api.cryptocompare.com/data/v2/histoday",
+                     "https://min-api.cryptocompare.com/data/v2/histohour")
+  
+  # Define the start and end times
+  timestamp_now <- timestamp_now #as.numeric(Sys.time())
+  timestamp_2018 <- as.numeric(as.POSIXct("2018-01-01"))
+  
+  params <- list(
+    fsym = fsym,
+    tsym = tsym,
+    limit = 2000,  # Maximum allowed by the API for one call
+    toTs = timestamp_now
+  )
+  
+  # Fetch the data
+  response <- GET(url = base_url, query = params)
+  data <- fromJSON(content(response, as = "text"))$Data$Data
+  
+  # Continue fetching if more data is needed (due to the limit)
+  while (data[1,1] > timestamp_2018) {
+    params$toTs <- data[1,1]
+    response <- GET(url = base_url, query = params)
+    more_data <- fromJSON(content(response, as = "text"))$Data$Data
+    data <- rbind(more_data, data)
+  }
+  
+  data <- data %>%
+    # Convert the timestamp to a datetime column
+    mutate(datetime = as.POSIXct(time, origin = "1970-01-01", tz = "UTC")) %>%
+    
+    # Filter out rows before 2018-01-01
+    filter(datetime >= as.POSIXct("2018-01-01", tz = "UTC")) %>%
+    
+    # Create a column for just the day
+    mutate(day = as.Date(datetime)) %>%
+    
+    # Calculate hourly returns
+    arrange(day, datetime) %>%
+    mutate(returns = (close/lag(close) - 1) * 100) %>%
+    
+    # Select relevant columns
+    dplyr::select(datetime, day, open, close, returns)
+  return(data)
+}
+
+# Function extract data returns and realized vol
+data_to_garch <- function(crypto = "BTC", comparative = "USD", timestamp_now = as.numeric(as.POSIXct("2023-08-31"))) {
+  
+  data_h <- fetch_cryto_data(fsym = crypto, 
+                                 tsym = comparative, 
+                                 timestamp_now = timestamp_now,
+                                 frequency = "hourly")
+  data_d <- fetch_cryto_data(fsym = crypto, 
+                                 tsym = comparative, 
+                                 timestamp_now = timestamp_now,
+                                 frequency = "daily")
+  
+  daily <- data_d[!is.na(data_d$returns), ]
+  daily_xts <- xts(daily$returns, order.by = as.Date(daily$day))
+  
+  hourly <- data_h[!is.na(data_h$returns), ]
+  returns_h <- hourly$returns
+  hourly$Date <- as.Date(hourly$datetime)  # Extract the date from the timestamp
+  hourly_realized_var <- aggregate((returns/100)^2 ~ Date, data = hourly, sum)  # Sum of squared returns by day
+  colnames(hourly_realized_var)[2] <- "realized_var"
+  hourly_realized_vol <- sqrt(hourly_realized_var$realized_var)*100
+  hourly_realized_vol_xts <- xts(hourly_realized_vol, order.by = as.Date(hourly_realized_var$Date))
+  
+  # Merge returns and realized volatility into a single xts object
+  merged_data <- merge(daily_xts, hourly_realized_vol_xts, join="inner", suffixes = c("_returns", "_vol"))
+  return(merged_data)
+}
